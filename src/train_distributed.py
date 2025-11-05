@@ -1,6 +1,6 @@
 """
-Distributed training script for Symptom-Diagnosis-GPT using Ray.
-Supports distributed training across multiple nodes/workers with fallback to PyTorch DDP.
+Distributed training script for Symptom-Diagnosis-GPT using PyTorch DDP.
+Primary support for PyTorch Distributed Data Parallel with Ray as optional fallback.
 """
 import os
 import sys
@@ -17,7 +17,18 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
 
-# Ray imports (with fallback handling)
+# PyTorch distributed imports (primary method)
+try:
+    import torch.distributed as dist
+    import torch.multiprocessing as mp
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    TORCH_DDP_AVAILABLE = True
+    print("✅ PyTorch DDP available - primary distributed training method")
+except ImportError:
+    TORCH_DDP_AVAILABLE = False
+    print("⚠️  PyTorch DDP not available")
+
+# Ray imports (optional fallback)
 RAY_AVAILABLE = False
 try:
     import ray
@@ -25,20 +36,9 @@ try:
     from ray.train import ScalingConfig, RunConfig, CheckpointConfig
     from ray.train.torch import TorchTrainer
     RAY_AVAILABLE = True
-    print("✅ Ray available for distributed training")
+    print("✅ Ray available as optional distributed training method")
 except ImportError:
-    print("⚠️  Ray not available, using PyTorch DDP or single-node training")
-
-# PyTorch distributed imports
-try:
-    import torch.distributed as dist
-    import torch.multiprocessing as mp
-    from torch.nn.parallel import DistributedDataParallel as DDP
-    TORCH_DDP_AVAILABLE = True
-    print("✅ PyTorch DDP available")
-except ImportError:
-    TORCH_DDP_AVAILABLE = False
-    print("⚠️  PyTorch DDP not available")
+    print("⚠️  Ray not available - using PyTorch DDP or single-node training")
 
 # Local imports
 from .config import get_model_config, get_distributed_config
@@ -261,55 +261,82 @@ def ray_train_func(config_dict: Dict[str, Any]):
             train.report(metrics={}, checkpoint=train.Checkpoint.from_dict(checkpoint_dict))
 
 
-def setup_ddp(rank, world_size, backend="nccl"):
-    """Setup PyTorch DDP."""
+def setup_ddp(rank, world_size, backend=None, master_port="12355"):
+    """Setup PyTorch DDP with automatic backend selection."""
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = master_port
     
-    # Use gloo for CPU, nccl for GPU
-    if not torch.cuda.is_available():
-        backend = "gloo"
+    # Auto-select backend based on hardware
+    if backend is None:
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            backend = "nccl"  # Best for multi-GPU
+        else:
+            backend = "gloo"  # Works for CPU and single GPU
     
-    dist.init_process_group(backend, rank=rank, world_size=world_size)
+    logger.info(f"Worker {rank}: Initializing DDP with backend '{backend}'")
     
-    if torch.cuda.is_available():
-        torch.cuda.set_device(rank)
+    try:
+        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        
+        if torch.cuda.is_available() and world_size <= torch.cuda.device_count():
+            # Multi-GPU setup
+            torch.cuda.set_device(rank)
+            device = torch.device(f"cuda:{rank}")
+        elif torch.cuda.is_available():
+            # Single GPU shared across workers
+            device = torch.device("cuda:0")
+        else:
+            # CPU only
+            device = torch.device("cpu")
+        
+        logger.info(f"Worker {rank}: DDP initialized successfully on {device}")
+        return device
+        
+    except Exception as e:
+        logger.error(f"Worker {rank}: Failed to initialize DDP: {e}")
+        raise
 
 
 def cleanup_ddp():
     """Cleanup PyTorch DDP."""
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    try:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+            logger.info("DDP process group destroyed")
+    except Exception as e:
+        logger.warning(f"Error during DDP cleanup: {e}")
 
 
 def ddp_train_worker(rank, world_size, config_dict):
-    """DDP training worker function."""
+    """DDP training worker function with improved error handling."""
+    device = None
+    
     try:
         # Setup DDP
-        setup_ddp(rank, world_size)
+        device = setup_ddp(rank, world_size)
         
         # Get configurations
         model_config = config_dict["model_config"]
         distributed_config = config_dict["distributed_config"]
         
-        # Setup device
-        if torch.cuda.is_available():
-            device = torch.device(f"cuda:{rank}")
-        else:
-            device = torch.device("cpu")
+        logger.info(f"Worker {rank}: Starting training on {device}")
         
-        logger.info(f"Worker {rank}: Using device {device}")
-        
-        # Load data
+        # Load data (only rank 0 creates data if missing)
         train_data, val_data, _ = load_dataset()
         if train_data is None:
             if rank == 0:
-                logger.info("No processed data found, creating dataset...")
+                logger.info("Worker 0: Creating dataset...")
                 train_data, val_data, _ = build_dataset(num_samples=1000)
-            else:
-                # Wait for rank 0 to create data
-                time.sleep(10)
+                logger.info("Worker 0: Dataset created, other workers can proceed")
+            
+            # Synchronize all workers
+            dist.barrier()
+            
+            # Non-rank 0 workers load the data created by rank 0
+            if rank != 0:
                 train_data, val_data, _ = load_dataset()
+                if train_data is None:
+                    raise RuntimeError(f"Worker {rank}: Failed to load dataset after rank 0 creation")
         
         # Update vocab size based on data
         if train_data and "input_ids" in train_data:
@@ -320,11 +347,16 @@ def ddp_train_worker(rank, world_size, config_dict):
         model = SymptomDiagnosisGPT(model_config)
         model = model.to(device)
         
-        # Wrap model with DDP
-        if torch.cuda.is_available():
-            model = DDP(model, device_ids=[rank])
-        else:
-            model = DDP(model)
+        # Wrap model with DDP - handle different scenarios
+        if world_size > 1:
+            if torch.cuda.is_available() and world_size <= torch.cuda.device_count():
+                # Multi-GPU DDP
+                model = DDP(model, device_ids=[rank])
+                logger.info(f"Worker {rank}: Multi-GPU DDP initialized")
+            else:
+                # CPU or shared GPU DDP
+                model = DDP(model)
+                logger.info(f"Worker {rank}: CPU/Shared GPU DDP initialized")
         
         # Create data loaders with distributed sampling
         train_loader, val_loader = create_data_loaders(
@@ -340,6 +372,51 @@ def ddp_train_worker(rank, world_size, config_dict):
         
         total_steps = len(train_loader) * model_config.max_epochs
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+        
+        # Training loop
+        best_val_loss = float('inf')
+        
+        for epoch in range(model_config.max_epochs):
+            # Set epoch for distributed sampler (important for proper shuffling)
+            if hasattr(train_loader.sampler, 'set_epoch'):
+                train_loader.sampler.set_epoch(epoch)
+            
+            # Synchronize all workers before training
+            dist.barrier()
+            
+            # Train
+            train_loss = train_epoch(
+                model, train_loader, optimizer, scheduler,
+                device, model_config, epoch, rank
+            )
+            
+            # Only rank 0 does validation and saves model
+            if rank == 0:
+                val_metrics = compute_metrics(model, val_loader, device)
+                
+                logger.info(f"Epoch {epoch}: train_loss={train_loss:.4f}, "
+                           f"val_loss={val_metrics['loss']:.4f}, "
+                           f"val_accuracy={val_metrics['accuracy']:.4f}")
+                
+                # Save checkpoint if best model
+                if val_metrics['loss'] < best_val_loss:
+                    best_val_loss = val_metrics['loss']
+                    
+                    # Save model (unwrap DDP to get the actual model)
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    model_to_save.save_checkpoint(
+                        model_config.model_save_path,
+                        optimizer_state=optimizer.state_dict(),
+                        epoch=epoch,
+                        loss=val_metrics['loss']
+                    )
+                    logger.info(f"Worker {rank}: New best model saved (loss: {best_val_loss:.4f})")
+            
+            # Synchronize all workers after each epoch
+            dist.barrier()
+        
+        logger.info(f"Worker {rank}: Training completed successfully!")
+        return {"rank": rank, "best_val_loss": best_val_loss if rank == 0 else None}
         
         # Training loop
         best_val_loss = float('inf')
@@ -376,19 +453,61 @@ def ddp_train_worker(rank, world_size, config_dict):
                         loss=val_metrics['loss']
                     )
         
-        logger.info(f"Worker {rank}: Training completed!")
-        
     except Exception as e:
         logger.error(f"Worker {rank} failed: {e}")
+        import traceback
+        logger.error(f"Worker {rank} traceback: {traceback.format_exc()}")
         raise
     finally:
         cleanup_ddp()
 
 
 def train_with_pytorch_ddp(model_config, distributed_config):
-    """Train using PyTorch DDP."""
+    """Train using PyTorch DDP with improved error handling and hardware detection."""
     if not TORCH_DDP_AVAILABLE:
         logger.warning("PyTorch DDP not available, falling back to single-node")
+        return None
+    
+    world_size = model_config.num_workers
+    
+    # Validate hardware setup
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        logger.info(f"CUDA available: {gpu_count} GPUs detected")
+        
+        if world_size > gpu_count:
+            logger.warning(f"Requested {world_size} workers but only {gpu_count} GPUs available")
+            logger.info("Will use CPU/shared GPU mode")
+    else:
+        logger.info("CUDA not available, using CPU-only training")
+    
+    logger.info(f"🚀 Starting PyTorch DDP training with {world_size} workers...")
+    
+    # Prepare config for workers
+    config_dict = {
+        "model_config": model_config,
+        "distributed_config": distributed_config
+    }
+    
+    try:
+        # Use spawn method for better compatibility across platforms
+        mp.set_start_method('spawn', force=True)
+        
+        # Spawn processes for DDP
+        mp.spawn(
+            ddp_train_worker,
+            args=(world_size, config_dict),
+            nprocs=world_size,
+            join=True
+        )
+        
+        logger.info("✅ PyTorch DDP training completed successfully!")
+        return {"status": "success", "method": "pytorch_ddp", "workers": world_size}
+        
+    except Exception as e:
+        logger.error(f"PyTorch DDP training failed: {e}")
+        import traceback
+        logger.error(f"DDP training traceback: {traceback.format_exc()}")
         return None
     
     world_size = model_config.num_workers
@@ -616,29 +735,36 @@ class DistributedTrainer:
 
 
 def main():
-    """Main function for distributed training."""
+    """Main function for distributed training with PyTorch DDP priority."""
     import argparse
     
     parser = argparse.ArgumentParser(description="Distributed training for Symptom-Diagnosis-GPT")
-    parser.add_argument("--num-workers", type=int, default=2, help="Number of workers")
-    parser.add_argument("--num-epochs", type=int, default=10, help="Number of epochs")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
+    parser.add_argument("--num-workers", type=int, default=2, help="Number of workers for distributed training")
+    parser.add_argument("--num-epochs", type=int, default=10, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size per worker")
     parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--use-ray", action="store_true", default=False, help="Force use Ray (if available)")
     parser.add_argument("--ray-address", type=str, default=None, help="Ray cluster address")
     parser.add_argument("--data-samples", type=int, default=1000, help="Number of data samples to generate")
     parser.add_argument("--single-node", action="store_true", help="Force single-node training")
+    parser.add_argument("--cpu-only", action="store_true", help="Force CPU-only training")
     
     args = parser.parse_args()
     
     # Print available training methods
-    print("🎯 Available Training Methods:")
-    print(f"   - PyTorch DDP: {'✅' if TORCH_DDP_AVAILABLE else '❌'}")
-    print(f"   - Ray: {'✅' if RAY_AVAILABLE else '❌'}")
-    print(f"   - Single-node: ✅")
-    print()
+    print("🎯 Symptom-Diagnosis-GPT Distributed Training")
+    print("=" * 50)
+    print("Available training methods:")
+    print(f"   🔧 PyTorch DDP: {'✅ Available' if TORCH_DDP_AVAILABLE else '❌ Not available'}")
+    print(f"   🚀 Ray: {'✅ Available' if RAY_AVAILABLE else '❌ Not available'}")
+    print(f"   💻 Single-node: ✅ Always available")
     
-    args = parser.parse_args()
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        print(f"   🎮 GPUs: {gpu_count} detected")
+    else:
+        print(f"   🎮 GPUs: None detected (CPU only)")
+    print()
     
     # Update configuration
     model_config = get_model_config()
@@ -651,22 +777,58 @@ def main():
     model_config.use_ray = args.use_ray
     distributed_config.ray_address = args.ray_address
     
-    # Force single-node if requested
+    # Handle special cases
+    if args.cpu_only:
+        model_config.device = "cpu"
+        print("🔧 Forcing CPU-only training")
+    
     if args.single_node:
         model_config.num_workers = 1
         model_config.use_ray = False
+        print("🔧 Forcing single-node training")
+    
+    # Validate worker count vs available GPUs
+    if not args.cpu_only and torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        if args.num_workers > gpu_count:
+            print(f"⚠️  Warning: {args.num_workers} workers requested but only {gpu_count} GPUs available")
+            print("   Will use shared GPU or CPU mode")
+    
+    # Print training configuration
+    print(f"📋 Training Configuration:")
+    print(f"   Workers: {model_config.num_workers}")
+    print(f"   Epochs: {model_config.max_epochs}")
+    print(f"   Batch size: {model_config.batch_size}")
+    print(f"   Learning rate: {model_config.learning_rate}")
+    print(f"   Device: {model_config.device}")
+    print()
     
     # Ensure data exists
     train_data, val_data, _ = load_dataset()
     if train_data is None:
-        logger.info(f"Creating dataset with {args.data_samples} samples...")
+        print(f"📊 Creating dataset with {args.data_samples} samples...")
         build_dataset(num_samples=args.data_samples)
+        print("✅ Dataset created")
+    else:
+        print("✅ Using existing dataset")
     
     # Start training
+    print("🚀 Starting training...")
     trainer = DistributedTrainer(model_config, distributed_config)
     result = trainer.train()
     
-    logger.info(f"Training completed with result: {result}")
+    if result and result.get("status") == "success":
+        print("✅ Training completed successfully!")
+        print(f"   Method used: {result.get('method', 'unknown')}")
+        if 'workers' in result:
+            print(f"   Workers: {result['workers']}")
+    else:
+        print("❌ Training failed or returned no result")
+    
+    print(f"\n📁 Model saved to: {model_config.model_save_path}")
+    print("🚀 Next steps:")
+    print("   1. Start API: python -m src.api")
+    print("   2. Start UI: streamlit run src/streamlit_app.py")
 
 
 if __name__ == "__main__":

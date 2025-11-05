@@ -11,7 +11,7 @@ from typing import Dict, Any
 
 # Page configuration
 st.set_page_config(
-    page_title="Symptom Diagnosis GPT",
+    page_title="Tibu GPT",
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -48,14 +48,50 @@ def predict_diagnosis(symptoms: str, max_length: int = 50, temperature: float = 
         if response.status_code == 200:
             return response.json()
         else:
-            return {"error": f"API Error: {response.status_code} - {response.text}"}
+            error_detail = "Unknown error"
+            try:
+                error_data = response.json()
+                error_detail = error_data.get("detail", response.text)
+            except:
+                error_detail = response.text
+            
+            return {"error": f"API Error: {response.status_code} - {error_detail}"}
             
     except requests.exceptions.ConnectionError:
-        return {"error": "Cannot connect to API. Please ensure the server is running."}
+        return {"error": "Cannot connect to API server. Please start the API server first."}
     except requests.exceptions.Timeout:
         return {"error": "Request timed out. Please try again."}
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
+
+
+def predict_diagnosis_demo(symptoms: str) -> Dict[str, Any]:
+    """Demo prediction without API (fallback mode)."""
+    import random
+    
+    # Mock diagnoses based on common symptoms
+    symptom_keywords = symptoms.lower()
+    
+    if any(word in symptom_keywords for word in ["fever", "temperature", "hot"]):
+        diagnoses = ["flu", "viral infection", "common cold"]
+    elif any(word in symptom_keywords for word in ["chest", "pain", "heart"]):
+        diagnoses = ["chest strain", "anxiety", "heart palpitations"]
+    elif any(word in symptom_keywords for word in ["headache", "head", "migraine"]):
+        diagnoses = ["tension headache", "migraine", "stress headache"]
+    elif any(word in symptom_keywords for word in ["stomach", "nausea", "vomit"]):
+        diagnoses = ["gastroenteritis", "food poisoning", "stomach flu"]
+    else:
+        diagnoses = ["viral infection", "common cold", "stress-related symptoms"]
+    
+    diagnosis = random.choice(diagnoses)
+    confidence = random.uniform(0.6, 0.85)
+    
+    return {
+        "diagnosis": diagnosis,
+        "confidence": confidence,
+        "input_text": f"Symptoms: {symptoms}\nDiagnosis:",
+        "generated_text": f"Symptoms: {symptoms}\nDiagnosis: {diagnosis}"
+    }
 
 
 def get_model_info() -> Dict[str, Any]:
@@ -74,7 +110,7 @@ def main():
     """Main Streamlit application."""
     
     # Header
-    st.title("🏥 Symptom Diagnosis GPT")
+    st.title("🏥 Tibu GPT")
     st.markdown("### AI-Powered Symptom Analysis and Diagnosis Prediction")
     st.markdown("---")
     
@@ -87,8 +123,14 @@ def main():
         st.sidebar.success("✅ API Connected")
     else:
         st.sidebar.error("❌ API Disconnected")
-        st.sidebar.markdown("Please start the API server:")
-        st.sidebar.code("cd src && python -m api", language="bash")
+        st.sidebar.markdown("**Start API server:**")
+        st.sidebar.code("python run_api.py", language="bash")
+        st.sidebar.markdown("**Or use demo mode** (limited functionality)")
+    
+    # Show demo mode status
+    if not api_healthy:
+        st.sidebar.info("🎭 Running in Demo Mode")
+        st.sidebar.markdown("Demo mode provides basic functionality without the trained AI model.")
     
     # Model parameters
     st.sidebar.subheader("Generation Parameters")
@@ -168,18 +210,39 @@ def main():
         st.subheader("Diagnosis Prediction")
         
         if predict_button and symptoms_text.strip():
-            with st.spinner("Analyzing symptoms..."):
-                result = predict_diagnosis(symptoms_text, max_length, temperature)
+            if api_healthy:
+                # Use real API
+                with st.spinner("Analyzing symptoms..."):
+                    result = predict_diagnosis(symptoms_text, max_length, temperature)
+            else:
+                # Use demo mode
+                st.warning("⚠️ API not available - using demo mode")
+                with st.spinner("Generating demo prediction..."):
+                    result = predict_diagnosis_demo(symptoms_text)
             
             if "error" in result:
                 st.error(f"Error: {result['error']}")
-            else:
+                
+                # Offer demo mode as fallback
+                if api_healthy:  # If API was supposed to work but failed
+                    st.info("Trying demo mode...")
+                    result = predict_diagnosis_demo(symptoms_text)
+                    if "error" not in result:
+                        st.warning("Using demo prediction (API failed)")
+            
+            if "error" not in result:
                 # Display results
-                st.success("Analysis Complete!")
+                if api_healthy:
+                    st.success("Analysis Complete!")
+                else:
+                    st.info("Demo Analysis Complete!")
                 
                 # Main diagnosis
                 st.markdown("### 🎯 Predicted Diagnosis")
                 st.markdown(f"**{result['diagnosis']}**")
+                
+                if not api_healthy:
+                    st.caption("🎭 This is a demo prediction. Start the API server for AI-powered results.")
                 
                 # Confidence score
                 confidence = result.get('confidence', 0.0)
@@ -196,7 +259,9 @@ def main():
                     st.code(result.get('generated_text', ''), language="text")
         
         elif not api_healthy:
-            st.info("Please start the API server to begin symptom analysis.")
+            st.info("API server not available. You can still use demo mode by entering symptoms above.")
+            st.markdown("**To enable full AI functionality:**")
+            st.code("python run_api.py", language="bash")
         else:
             st.info("Enter your symptoms above to get a diagnosis prediction.")
     
@@ -240,7 +305,7 @@ def main():
 
 def run_demo():
     """Run a demo version without API dependency."""
-    st.title("🏥 Symptom Diagnosis GPT - Demo Mode")
+    st.title("🏥 Tibu GPT - Demo Mode")
     st.warning("Running in demo mode. API server not available.")
     
     symptoms = st.text_area("Enter symptoms:", placeholder="Describe your symptoms...")

@@ -323,7 +323,7 @@ if __name__ == "__main__":
     
     config = get_model_config()
     uvicorn.run(
-        "api:app",
+        "src.api:app",
         host=config.api_host,
         port=config.api_port,
         reload=True

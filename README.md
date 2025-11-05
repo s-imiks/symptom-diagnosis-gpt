@@ -55,14 +55,36 @@ pip install torch tiktoken fastapi uvicorn streamlit numpy pandas pydantic reque
 pip install "ray[train]>=2.8.0"
 ```
 
-### Quick Start (No Ray Required)
+## 🚀 Quick Start
 
+### Method 1: Automated Setup (Recommended)
 ```bash
-# Check system requirements
-python simple_train.py --check
+# Complete setup and start all services
+python quickstart.py --setup
+```
 
-# Quick training and setup
+### Method 2: Manual Steps
+```bash
+# 1. Check system
+python quickstart.py --check
+
+# 2. Create data (if needed)
+python -m src.prepare_data --num-samples 200
+
+# 3. Train model (if needed)
 python simple_train.py --train
+
+# 4. Start API server (in one terminal)
+python run_api.py
+
+# 5. Start web interface (in another terminal)
+python run_streamlit.py
+```
+
+### Method 3: Demo Mode (No API needed)
+```bash
+# Just start the web interface - it will work in demo mode
+python run_streamlit.py
 ```
 
 ## 📊 Data Preparation
