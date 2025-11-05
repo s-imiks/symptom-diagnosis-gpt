@@ -1,6 +1,6 @@
 # 🏥 Symptom-Diagnosis-GPT
 
-A production-ready distributed transformer model for predicting medical diagnoses from symptom descriptions. Built with PyTorch, Ray, and FastAPI for scalable training and deployment.
+A production-ready distributed transformer model for predicting medical diagnoses from symptom descriptions. Built with PyTorch, FastAPI, and Streamlit for scalable training and deployment.
 
 ## 🚀 Features
 
@@ -23,9 +23,13 @@ A production-ready distributed transformer model for predicting medical diagnose
 │   ├── prepare_data.py        # Dataset creation and preprocessing
 │   ├── model.py              # GPT-like transformer model
 │   ├── train_distributed.py  # Distributed training with Ray
-│   ├── train.py              # Single-node training (legacy)
+│   ├── train.py              # Single-node training
 │   ├── api.py                # FastAPI server
 │   └── streamlit_app.py      # Web UI
+├── quickstart.py              # Automated setup script
+├── simple_train.py           # Simple training without Ray
+├── run_api.py               # API server launcher
+├── run_streamlit.py         # Web UI launcher
 ├── requirements.txt
 └── README.md
 ```
@@ -37,80 +41,89 @@ A production-ready distributed transformer model for predicting medical diagnose
 - Python 3.8+
 - CUDA (optional, for GPU acceleration)
 
-### Setup
+### Quick Setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/symptom-diagnosis-gpt.git
+git clone https://github.com/MarwaMasese/symptom-diagnosis-gpt.git
 cd symptom-diagnosis-gpt
 
 # Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install core dependencies
-pip install torch tiktoken fastapi uvicorn streamlit numpy pandas pydantic requests
+# Activate virtual environment
+# On Windows:
+.venv\Scripts\activate
+# On Linux/Mac:
+source .venv/bin/activate
 
-# Optional: Install Ray for advanced distributed training
-pip install "ray[train]>=2.8.0"
+# Install all dependencies
+pip install -r requirements.txt
 ```
 
 ## 🚀 Quick Start
 
-### Method 1: Automated Setup (Recommended)
+### Method 1: One-Command Setup (Recommended)
 ```bash
-# Complete setup and start all services
+# Complete automated setup - checks system, creates data, trains model, starts services
 python quickstart.py --setup
 ```
 
-### Method 2: Manual Steps
+### Method 2: Step-by-Step Setup
 ```bash
-# 1. Check system
+# 1. Check system requirements
 python quickstart.py --check
 
-# 2. Create data (if needed)
-python -m src.prepare_data --num-samples 200
-
-# 3. Train model (if needed)
+# 2. Train model (creates data automatically if needed)
 python simple_train.py --train
 
-# 4. Start API server (in one terminal)
+# 3. Start API server (in one terminal)
 python run_api.py
 
-# 5. Start web interface (in another terminal)
+# 4. Start web interface (in another terminal)
 python run_streamlit.py
 ```
 
-### Method 3: Demo Mode (No API needed)
+### Method 3: Individual Services
 ```bash
-# Just start the web interface - it will work in demo mode
+# Just start the web interface (works in demo mode without API)
 python run_streamlit.py
+
+# Or just start the API server
+python run_api.py
 ```
 
 ## 📊 Data Preparation
 
-### Option 1: Generate Synthetic Dataset
+The system automatically creates synthetic data when needed, but you can also customize the data generation:
+
+### Automatic Data Creation (Recommended)
+```bash
+# Data is created automatically when you run:
+python simple_train.py --train
+# or
+python quickstart.py --setup
+```
+
+### Manual Data Creation
 ```bash
 # Create synthetic symptom-diagnosis dataset
 python -m src.prepare_data --num-samples 1000
-```
 
-### Option 2: Use External Dataset
-```bash
 # Use your own CSV file (requires 'symptoms' and 'diagnosis' columns)
 python -m src.prepare_data --external-file path/to/your/dataset.csv
 ```
 
 ## 🎯 Training
 
-### Simple Training (Recommended)
+### Simple Training (Recommended for Getting Started)
 
 **No Ray Required - Works Out of the Box:**
 ```bash
-# Quick system check
+# Check system requirements
 python simple_train.py --check
 
-# Start training
+# Start training (creates data automatically if needed)
 python simple_train.py --train
 ```
 
@@ -118,12 +131,18 @@ python simple_train.py --train
 
 **PyTorch DDP (Multi-GPU/Multi-Node):**
 ```bash
-# Local multi-worker training (if multiple GPUs available)
+# Single-node training with DDP support
+python -m src.train_distributed --single-node --num-epochs 10 --batch-size 16
+
+# Multi-worker training (if multiple GPUs available)
 python -m src.train_distributed --num-workers 2 --num-epochs 10
 ```
 
-**Ray Distributed Training (Optional - if Ray installed):**
+**Ray Distributed Training (Optional - requires Ray installation):**
 ```bash
+# Install Ray first
+pip install "ray[train]>=2.8.0"
+
 # Local Ray training
 python -m src.train_distributed --num-workers 2 --use-ray --num-epochs 10
 
@@ -131,7 +150,7 @@ python -m src.train_distributed --num-workers 2 --use-ray --num-epochs 10
 python -m src.train_distributed --num-workers 4 --ray-address ray://head-node-ip:10001
 ```
 
-**Single-Node Training:**
+**Legacy Single-Node Training:**
 ```bash
 python -m src.train --epochs 10 --batch-size 32
 ```
@@ -150,12 +169,18 @@ python -m src.train_distributed \
 
 ### API Server
 
-**Start the FastAPI server:**
+**Easy Start:**
 ```bash
-# Development
-cd src && python -m api
+# Start with the launcher script (recommended)
+python run_api.py
+```
 
-# Production
+**Manual Start:**
+```bash
+# Development mode
+python -m src.api
+
+# Production mode
 uvicorn src.api:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
@@ -167,14 +192,45 @@ uvicorn src.api:app --host 0.0.0.0 --port 8000 --workers 4
 
 ### Web Interface
 
-**Start the Streamlit app:**
+**Easy Start:**
 ```bash
-streamlit run src/streamlit_app.py
+# Start with the launcher script (recommended)
+python run_streamlit.py
 ```
 
-Access the web interface at `http://localhost:8501`
+**Manual Start:**
+```bash
+# Direct Streamlit command
+streamlit run src/streamlit_app.py --server.port 8501
+```
+
+**Access:** The web interface will be available at `http://localhost:8501`
+
+### System URLs
+
+Once running, you can access:
+- **Web Interface**: http://localhost:8501
+- **API Documentation**: http://localhost:8000/docs
+- **API Health Check**: http://localhost:8000/health
 
 ## 💻 Usage Examples
+
+### Quick Start Commands
+
+```bash
+# Complete setup in one command
+python quickstart.py --setup
+
+# Check system status
+python quickstart.py --check
+
+# Train model only
+python simple_train.py --train
+
+# Start services individually
+python run_api.py        # API server
+python run_streamlit.py  # Web interface
+```
 
 ### API Usage
 
@@ -210,6 +266,21 @@ model, checkpoint = SymptomDiagnosisGPT.load_checkpoint(config.model_save_path)
 # Generate prediction
 input_text = "Symptoms: fever, headache, fatigue\nDiagnosis:"
 # ... tokenize and predict
+```
+
+### Command Line Testing
+
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# Prediction test
+curl -X POST "http://localhost:8000/predict" \
+  -H "Content-Type: application/json" \
+  -d '{"symptoms": "fever and cough"}'
+
+# Windows PowerShell
+Invoke-RestMethod -Uri "http://localhost:8000/health" -Method Get
 ```
 
 ## 🌐 Distributed Training Benefits
@@ -272,24 +343,53 @@ distributed_config = DistributedConfig(
 
 ## 🧪 Testing
 
-### Test the API
+### System Check
+```bash
+# Comprehensive system check
+python quickstart.py --check
+
+# Training system check
+python simple_train.py --check
+```
+
+### API Testing
 ```bash
 # Health check
 curl http://localhost:8000/health
 
-# Prediction test
+# Prediction test (Linux/Mac)
 curl -X POST "http://localhost:8000/predict" \
   -H "Content-Type: application/json" \
   -d '{"symptoms": "fever and cough"}'
+
+# Windows PowerShell
+Invoke-RestMethod -Uri "http://localhost:8000/predict" -Method Post -ContentType "application/json" -Body '{"symptoms": "fever and cough"}'
 ```
 
 ### Load Testing
 ```bash
-# Install hey for load testing
+# Install hey for load testing (optional)
 # Run 100 requests with 10 concurrent connections
 hey -n 100 -c 10 -m POST -H "Content-Type: application/json" \
   -d '{"symptoms": "headache and nausea"}' \
   http://localhost:8000/predict
+```
+
+### Manual Testing Workflow
+```bash
+# 1. Check everything is working
+python quickstart.py --check
+
+# 2. Start API server (in terminal 1)
+python run_api.py
+
+# 3. Test API (in terminal 2)
+curl http://localhost:8000/health
+
+# 4. Start web interface (in terminal 3)
+python run_streamlit.py
+
+# 5. Open browser to http://localhost:8501
 ```
 
 ## 🐳 Docker Deployment
@@ -331,36 +431,92 @@ services:
 
 ### Common Issues
 
-**Ray installation failed:**
+**Dependencies missing:**
 ```bash
-# Skip Ray, use PyTorch DDP or single-node instead
-python simple_train.py --train
+# Install all required packages
+pip install -r requirements.txt
 
-# Or install without Ray dependencies
+# Or install core packages individually
 pip install torch tiktoken fastapi uvicorn streamlit numpy pandas
 ```
 
-**PyTorch DDP issues:**
+**Ray installation failed (optional):**
 ```bash
-# Force single-node training
+# Skip Ray - use simple training instead
+python simple_train.py --train
+
+# Ray is only needed for advanced distributed training
+pip install "ray[train]>=2.8.0"  # If you specifically need Ray
+```
+
+**Model training fails:**
+```bash
+# Check system first
+python simple_train.py --check
+
+# Use simple training mode
+python simple_train.py --train
+
+# Or force single-node training
 python -m src.train_distributed --single-node
+```
+
+**API server not starting:**
+```bash
+# Check if port 8000 is available
+netstat -an | findstr :8000  # Windows
+lsof -i :8000               # Linux/Mac
+
+# Start with launcher script
+python run_api.py
+
+# Check if model file exists
+python quickstart.py --check
+```
+
+**Streamlit issues:**
+```bash
+# Use the launcher script
+python run_streamlit.py
+
+# Check if Streamlit is installed
+pip install streamlit
+
+# Manual start
+streamlit run src/streamlit_app.py
 ```
 
 **CUDA out of memory:**
 - Reduce batch size in config
 - Use mixed precision training
 - Use CPU instead: set device to "cpu" in config
-
-**API server not starting:**
-- Check port availability
-- Verify model file exists
-- Check dependencies
+- Use smaller model parameters
 
 **Import errors:**
 ```bash
-# Install missing packages individually
-pip install torch tiktoken fastapi uvicorn streamlit
+# Ensure you're in the project directory
+cd symptom-diagnosis-gpt
+
+# Check Python path
+python quickstart.py --check
+
+# Reinstall packages
+pip install -r requirements.txt
 ```
+
+### First-Time Setup Issues
+
+**"No module named 'src'":**
+- Make sure you're running commands from the project root directory
+- Use the provided launcher scripts: `python run_api.py` instead of direct imports
+
+**No data found:**
+- Run `python simple_train.py --train` - it creates data automatically
+- Or run `python quickstart.py --setup` for complete setup
+
+**No trained model:**
+- Run training first: `python simple_train.py --train`
+- Or use demo mode: just run `python run_streamlit.py`
 
 ## 📝 API Documentation
 
